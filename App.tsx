@@ -1,20 +1,14 @@
-import React, { useState, Suspense, useMemo } from 'react';
+import React, { useState, Suspense, useMemo, useEffect } from 'react';
 import { Experience } from './components/Experience';
 import { MusicPlayer } from './components/MusicPlayer';
 import { StarData, Song } from './types';
+import * as DB from './utils/db';
 
-// Initial Positions for 20 stars
+// Initial Positions for 20 stars (Fallback if DB is empty)
 const INITIAL_STARS: StarData[] = Array.from({ length: 20 }, (_, i) => {
-    // Random position surrounding the pearl
     const theta = Math.random() * Math.PI * 2;
-    
-    // Radius: Significantly increased range to scatter them
-    // Pearl radius is 2.5. We start further out.
-    // Range from 8 to 20
     const radius = 8 + Math.random() * 12; 
-    
-    // Height: Distributed more broadly
-    const y = -1.5 + Math.random() * 6; // Range -1.5 to 4.5
+    const y = -1.5 + Math.random() * 6;
 
     return {
         id: i,
@@ -31,34 +25,91 @@ const INITIAL_STARS: StarData[] = Array.from({ length: 20 }, (_, i) => {
 
 const generateId = () => Math.random().toString(36).substring(2, 9);
 
+interface TempImage {
+    url: string;
+    file?: File;
+    assetId?: string;
+}
+
 const App: React.FC = () => {
   const [stars, setStars] = useState<StarData[]>(INITIAL_STARS);
   const [playlist, setPlaylist] = useState<Song[]>([]);
   const [currentSongIndex, setCurrentSongIndex] = useState(0);
-  
-  // Progression State
   const [playbackCount, setPlaybackCount] = useState(0);
+  const [isDataLoaded, setIsDataLoaded] = useState(false);
+
+  // --- Persistence: Load on Mount ---
+  useEffect(() => {
+      const init = async () => {
+          try {
+              const savedState = await DB.loadGameState();
+              if (savedState) {
+                  // Reconstruct Stars (Convert AssetIDs to Blob URLs)
+                  const restoredStars = await Promise.all(savedState.stars.map(async (s) => {
+                      let imageUrls: string[] = [];
+                      if (s.imageAssetIds && s.imageAssetIds.length > 0) {
+                          const blobs = await Promise.all(s.imageAssetIds.map(id => DB.getAsset(id)));
+                          imageUrls = blobs.map(b => b ? URL.createObjectURL(b) : '');
+                          // Filter out failed loads
+                          imageUrls = imageUrls.filter(url => url !== '');
+                      }
+                      return { ...s, images: imageUrls };
+                  }));
+
+                  // Reconstruct Playlist
+                  const restoredPlaylist = await Promise.all(savedState.playlist.map(async (s) => {
+                      if (s.assetId) {
+                          const blob = await DB.getAsset(s.assetId);
+                          if (blob) {
+                              return { ...s, url: URL.createObjectURL(blob) };
+                          }
+                      }
+                      return s; // Fallback or invalid
+                  }));
+
+                  setStars(restoredStars);
+                  setPlaylist(restoredPlaylist.filter(s => s.url)); // Remove broken songs
+                  setPlaybackCount(savedState.playbackCount);
+              }
+          } catch (e) {
+              console.error("Failed to load game state", e);
+          } finally {
+              setIsDataLoaded(true);
+          }
+      };
+      init();
+  }, []);
+
+  // --- Persistence: Save Helper ---
+  const saveGame = async (newStars: StarData[], newPlaylist: Song[], newPlaybackCount: number) => {
+      // We pass the new state directly to ensure we save the latest snapshot
+      await DB.saveGameState({
+          stars: newStars,
+          playlist: newPlaylist,
+          playbackCount: newPlaybackCount
+      });
+  };
 
   // Derived Progression Stats
-  // Base Limit 5. Adds 1 for every 10 plays. Max 10.
   const maxPlaylistSize = useMemo(() => {
       const bonus = Math.floor(playbackCount / 10);
       return Math.min(10, 5 + bonus);
   }, [playbackCount]);
 
-  // Unlock continuous playback after reaching max limit (50 plays) + 10 more plays = 60 plays
   const isContinuousPlayUnlocked = playbackCount >= 60;
 
   // Modal State
   const [isUploadModalOpen, setUploadModalOpen] = useState(false);
   const [editingStarId, setEditingStarId] = useState<number | null>(null);
-  const [tempImages, setTempImages] = useState<string[]>([]);
+  
+  // Temp state now tracks metadata + file to allow saving
+  const [tempImages, setTempImages] = useState<TempImage[]>([]);
   const [tempText, setTempText] = useState("");
   const [dragActive, setDragActive] = useState(false);
 
   // --- Handlers ---
 
-  const handleMusicUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleMusicUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
         const file = e.target.files[0];
         
@@ -67,68 +118,105 @@ const App: React.FC = () => {
             return;
         }
 
-        const newSong: Song = {
-            id: generateId(),
-            name: file.name,
-            url: URL.createObjectURL(file)
-        };
+        try {
+            // Save to DB immediately
+            const assetId = await DB.saveAsset(file);
+            
+            const newSong: Song = {
+                id: generateId(),
+                name: file.name,
+                url: URL.createObjectURL(file),
+                assetId: assetId
+            };
 
-        const newPlaylist = [...playlist, newSong];
-        setPlaylist(newPlaylist);
-        
-        // Auto-play the new song immediately by setting index to the end
-        setCurrentSongIndex(newPlaylist.length - 1);
+            const newPlaylist = [...playlist, newSong];
+            setPlaylist(newPlaylist);
+            setCurrentSongIndex(newPlaylist.length - 1);
+            
+            // Persist State
+            saveGame(stars, newPlaylist, playbackCount);
+        } catch (err) {
+            console.error("Failed to save music", err);
+        }
     }
   };
 
   const handleSongEnd = () => {
-      // Increment playback count
-      setPlaybackCount(prev => prev + 1);
+      const newCount = playbackCount + 1;
+      setPlaybackCount(newCount);
+      saveGame(stars, playlist, newCount);
   };
 
   const handleStarClick = (id: number) => {
-      // Called when clicking an INACTIVE star or an ACTIVE star's "Edit" button
       const star = stars.find(s => s.id === id);
       if (star) {
           setEditingStarId(id);
-          // Pre-fill data if it exists (for editing mode)
-          setTempImages(star.images);
+          // Pre-fill data. Map existing URLs and AssetIDs to TempImage structure
+          const existingImages: TempImage[] = star.images.map((url, index) => ({
+              url,
+              assetId: star.imageAssetIds ? star.imageAssetIds[index] : undefined
+          }));
+          
+          setTempImages(existingImages);
           setTempText(star.text || "");
           setUploadModalOpen(true);
       }
   };
 
   const handleStarView = (id: number) => {
-      // Called when an ACTIVE star is opened to view memories
-      setStars(prev => prev.map(star => {
+      const newStars = stars.map(star => {
           if (star.id === id) {
               return { ...star, viewCount: star.viewCount + 1 };
           }
           return star;
-      }));
+      });
+      setStars(newStars);
+      saveGame(newStars, playlist, playbackCount);
   };
 
-  const handleLaunchStar = () => {
+  const handleLaunchStar = async () => {
       if (editingStarId === null) return;
 
-      setStars(prev => prev.map(star => {
-          if (star.id === editingStarId) {
-              return {
-                  ...star,
-                  isActive: true,
-                  images: tempImages,
-                  text: tempText,
-                  viewCount: 0 // Reset count on new launch/edit
-              };
-          }
-          return star;
-      }));
+      try {
+          // Process images: If it has a File, save it to DB and get AssetID. 
+          // If it already has AssetID, keep it.
+          const processedImages = await Promise.all(tempImages.map(async (img) => {
+              if (img.file) {
+                  const id = await DB.saveAsset(img.file);
+                  return { url: img.url, assetId: id }; // New persisted image
+              }
+              return { url: img.url, assetId: img.assetId }; // Existing persisted image
+          }));
 
-      // Reset Form
-      setTempImages([]);
-      setTempText("");
-      setEditingStarId(null);
-      setUploadModalOpen(false);
+          const finalImageUrls = processedImages.map(p => p.url);
+          const finalAssetIds = processedImages.map(p => p.assetId || ''); // Should ideally always have ID
+
+          const newStars = stars.map(star => {
+              if (star.id === editingStarId) {
+                  return {
+                      ...star,
+                      isActive: true,
+                      images: finalImageUrls,
+                      imageAssetIds: finalAssetIds,
+                      text: tempText,
+                      viewCount: 0 // Reset count on new launch/edit
+                  };
+              }
+              return star;
+          });
+
+          setStars(newStars);
+          saveGame(newStars, playlist, playbackCount);
+
+          // Reset Form
+          setTempImages([]);
+          setTempText("");
+          setEditingStarId(null);
+          setUploadModalOpen(false);
+      } catch (err) {
+          console.error("Failed to save star data", err);
+          alert("Error saving star data. Check console.");
+      }
   };
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -141,16 +229,19 @@ const App: React.FC = () => {
       const remainingSlots = 4 - tempImages.length;
       if (remainingSlots <= 0) return;
 
-      const newImages: string[] = [];
+      const newTempImages: TempImage[] = [];
       const count = Math.min(files.length, remainingSlots);
 
       for (let i = 0; i < count; i++) {
-          newImages.push(URL.createObjectURL(files[i]));
+          const file = files[i];
+          newTempImages.push({
+              url: URL.createObjectURL(file),
+              file: file // Store file for saving later
+          });
       }
-      setTempImages(prev => [...prev, ...newImages]);
+      setTempImages(prev => [...prev, ...newTempImages]);
   };
 
-  // Drag and Drop Handlers
   const handleDrag = (e: React.DragEvent) => {
       e.preventDefault();
       e.stopPropagation();
@@ -178,6 +269,16 @@ const App: React.FC = () => {
       document.getElementById('img-upload')?.click();
   };
 
+  // Deletion logic passed to MusicPlayer needs to persist too
+  const handlePlaylistUpdate = (newPlaylist: Song[]) => {
+      setPlaylist(newPlaylist);
+      saveGame(stars, newPlaylist, playbackCount);
+  };
+
+  if (!isDataLoaded) {
+      return <div className="w-full h-full bg-black flex items-center justify-center text-cyan-200 font-serif animate-pulse">Recovering Memories...</div>;
+  }
+
   return (
     <div className="relative w-full h-full bg-black overflow-hidden font-sans">
       
@@ -187,7 +288,6 @@ const App: React.FC = () => {
 
       {/* --- UI LAYER --- */}
 
-      {/* Top Left: HEART Button (Lavender/Purple) */}
       <div className="absolute top-6 left-6 z-10 flex flex-col gap-4">
           <div className="flex gap-2">
             <label className="cursor-pointer bg-purple-400/20 hover:bg-purple-400/40 text-purple-100 border border-purple-400/50 px-4 py-2 rounded-lg backdrop-blur-md transition-all text-xs uppercase tracking-widest font-bold shadow-[0_0_10px_rgba(192,132,252,0.3)]">
@@ -198,7 +298,6 @@ const App: React.FC = () => {
                  {20 - stars.filter(s => s.isActive).length} Stars Empty
             </div>
           </div>
-          {/* Debug/Progress Info (Optional visual for user to know capacity) */}
           {playbackCount > 0 && (
              <div className="px-2 py-1 text-[10px] text-slate-400 text-left">
                  XP: {playbackCount} | Cap: {maxPlaylistSize} {isContinuousPlayUnlocked ? "| ∞ Play Active" : ""}
@@ -214,7 +313,7 @@ const App: React.FC = () => {
                   <h3 className="text-xl text-white mb-4 font-serif">Light a new Star.玉</h3>
                   
                   <div className="space-y-4">
-                      {/* Image 2x2 Grid Area (Moderate Size) */}
+                      {/* Image 2x2 Grid Area */}
                       <div>
                           <label className="block text-slate-400 text-xs uppercase mb-1">Images ({tempImages.length}/4)</label>
                           
@@ -235,14 +334,12 @@ const App: React.FC = () => {
                               onDragOver={handleDrag}
                               onDrop={handleDrop}
                           >
-                               {/* Render 4 slots (Filled or Empty) */}
                                {[0, 1, 2, 3].map((index) => {
                                   const img = tempImages[index];
                                   if (img) {
-                                      // Filled Slot
                                       return (
                                           <div key={index} className="relative w-full h-full group">
-                                              <img src={img} className="w-full h-full object-cover rounded border border-white/20" />
+                                              <img src={img.url} className="w-full h-full object-cover rounded border border-white/20" />
                                               <button 
                                                 onClick={(e) => { e.stopPropagation(); removeTempImage(index); }}
                                                 className="absolute top-1 right-1 bg-black/60 hover:bg-red-500/80 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs transition-colors backdrop-blur-sm border border-white/10"
@@ -252,7 +349,6 @@ const App: React.FC = () => {
                                           </div>
                                       );
                                   } else if (index === tempImages.length) {
-                                      // Add/Upload Button Slot (Next available)
                                       return (
                                           <div 
                                             key={index}
@@ -264,7 +360,6 @@ const App: React.FC = () => {
                                           </div>
                                       );
                                   } else {
-                                      // Locked/Empty Placeholder Slot
                                       return (
                                           <div key={index} className="w-full h-full border border-white/5 rounded bg-black/20" />
                                       );
@@ -273,7 +368,6 @@ const App: React.FC = () => {
                           </div>
                       </div>
                       
-                      {/* Text Area - Matches Image Grid Height (h-48) */}
                       <div>
                           <label className="block text-slate-400 text-xs uppercase mb-1">
                              Message <span className="text-slate-600">({tempText.length}/4000)</span>
@@ -295,10 +389,9 @@ const App: React.FC = () => {
           </div>
       )}
 
-      {/* Bottom Right: Music Player */}
       <MusicPlayer 
         playlist={playlist} 
-        setPlaylist={setPlaylist} 
+        setPlaylist={handlePlaylistUpdate} 
         currentIndex={currentSongIndex} 
         setCurrentIndex={setCurrentSongIndex} 
         onSongEnd={handleSongEnd}
