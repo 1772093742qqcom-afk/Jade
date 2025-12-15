@@ -305,3 +305,120 @@ const ShootingStar: React.FC = () => {
             </mesh>
         </group>
     );
+};
+
+// Hidden Secret Trigger Component
+const SecretNameTrigger: React.FC = () => {
+    const { camera } = useThree();
+    const [visible, setVisible] = useState(false);
+    const isShowing = useRef(false);
+    const cooldown = useRef(false);
+
+    useFrame(() => {
+        // Condition 1: Distance (Zoomed In)
+        // Pearl is at 0, 1, 0. Camera default is 14. Min dist is 8.
+        // We trigger when user gets closer than 13.
+        const dist = camera.position.distanceTo(new THREE.Vector3(0, 1, 0));
+        
+        // Condition 2: Angle (Back view, approx -180 deg / +/-PI)
+        // Math.atan2(x, z) returns angle in radians. PI or -PI is the back.
+        const angle = Math.atan2(camera.position.x, camera.position.z);
+        // We look for angle close to PI (3.14) or -PI (-3.14). 
+        // Allow a small cone of vision (e.g., > 3.0 or < -3.0 radians)
+        const isBackView = Math.abs(angle) > 3.0;
+
+        if (dist < 13 && isBackView && !isShowing.current && !cooldown.current) {
+            isShowing.current = true;
+            cooldown.current = true; // Prevent spam
+            setVisible(true);
+
+            // Hide after 2 seconds
+            setTimeout(() => {
+                setVisible(false);
+                isShowing.current = false;
+                
+                // Allow re-trigger after 5 seconds
+                setTimeout(() => {
+                    cooldown.current = false;
+                }, 5000);
+            }, 2000);
+        }
+    });
+
+    if (!visible) return null;
+
+    return (
+        <Html center pointerEvents="none">
+            <div className="pointer-events-none select-none">
+                 <div className="bg-white/95 px-12 py-8 rounded-xl shadow-[0_0_50px_rgba(255,255,255,0.8)] backdrop-blur-md border border-white">
+                    <h1 
+                        className="text-6xl font-serif font-bold text-black tracking-[0.2em]"
+                        style={{ whiteSpace: 'nowrap' }}
+                    >
+                        赵钰洁
+                    </h1>
+                </div>
+            </div>
+        </Html>
+    );
+};
+
+export const Experience: React.FC<ExperienceProps> = ({ stars, onStarClick, onStarView }) => {
+  return (
+    <Canvas shadows dpr={[1, 2]}>
+      <PerspectiveCamera makeDefault position={[0, 4, 14]} fov={50} />
+      
+      <OrbitControls 
+        minDistance={8}
+        maxDistance={150} 
+        enablePan={false}
+      />
+
+      <GalaxyBackground />
+      <ShootingStar />
+      <SecretNameTrigger />
+      
+      {/* Solar System Planets */}
+      <Mercury />
+      <Venus />
+      <Earth />
+      <Mars />
+      <Jupiter />
+      <Saturn />
+
+      {/* Fog - Dark blueish to blend distant objects */}
+      <fog attach="fog" args={['#050520', 30, 200]} />
+
+      <ambientLight intensity={1.0} color="#8888ff" />
+      
+      <spotLight 
+        position={[15, 20, -10]} 
+        angle={0.5} 
+        penumbra={1} 
+        intensity={3} 
+        color="#cceeff" 
+        castShadow 
+      />
+      
+      <pointLight position={[-10, 5, 10]} intensity={2} color="#88aaff" />
+
+      <Pearl />
+      <Ocean />
+      <Stars data={stars} onStarClick={onStarClick} onStarView={onStarView} />
+      
+      <Sparkles 
+        count={800} 
+        scale={40} 
+        size={4} 
+        speed={0.3} 
+        opacity={0.6} 
+        color="#aaddff" 
+        position={[0, 5, 0]}
+      />
+      
+      <DreiStars radius={120} depth={50} count={8000} factor={6} saturation={0} fade speed={0.5} />
+      
+      <PostProcessing />
+    </Canvas>
+  );
+};
