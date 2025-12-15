@@ -3,9 +3,10 @@ import { Experience } from './components/Experience';
 import { MusicPlayer } from './components/MusicPlayer';
 import { StarData, Song } from './types';
 import * as DB from './utils/db';
+import { STATIC_STARS, STATIC_PLAYLIST, INITIAL_PLAYBACK_COUNT } from './data/initialData';
 
-// Initial Positions for 20 stars (Fallback if DB is empty)
-const INITIAL_STARS: StarData[] = Array.from({ length: 20 }, (_, i) => {
+// Fallback generator only used if STATIC_STARS is empty
+const generateRandomStars = (): StarData[] => Array.from({ length: 20 }, (_, i) => {
     const theta = Math.random() * Math.PI * 2;
     const radius = 8 + Math.random() * 12; 
     const y = -1.5 + Math.random() * 6;
@@ -32,10 +33,13 @@ interface TempImage {
 }
 
 const App: React.FC = () => {
-  const [stars, setStars] = useState<StarData[]>(INITIAL_STARS);
-  const [playlist, setPlaylist] = useState<Song[]>([]);
+  // Initialize with Static Data if available, otherwise random
+  const initialStarState = STATIC_STARS.length > 0 ? STATIC_STARS : generateRandomStars();
+  
+  const [stars, setStars] = useState<StarData[]>(initialStarState);
+  const [playlist, setPlaylist] = useState<Song[]>(STATIC_PLAYLIST);
   const [currentSongIndex, setCurrentSongIndex] = useState(0);
-  const [playbackCount, setPlaybackCount] = useState(0);
+  const [playbackCount, setPlaybackCount] = useState(INITIAL_PLAYBACK_COUNT);
   const [isDataLoaded, setIsDataLoaded] = useState(false);
 
   // --- Persistence: Load on Mount ---
@@ -44,14 +48,18 @@ const App: React.FC = () => {
           try {
               const savedState = await DB.loadGameState();
               if (savedState) {
-                  // Reconstruct Stars (Convert AssetIDs to Blob URLs)
+                  // SITUATION A: User has visited before (Load from their DB)
+                  
+                  // Reconstruct Stars
                   const restoredStars = await Promise.all(savedState.stars.map(async (s) => {
-                      let imageUrls: string[] = [];
+                      let imageUrls: string[] = s.images; // Default to existing URLs (could be static paths)
+                      
+                      // If it has DB Asset IDs, try to load blobs
                       if (s.imageAssetIds && s.imageAssetIds.length > 0) {
                           const blobs = await Promise.all(s.imageAssetIds.map(id => DB.getAsset(id)));
-                          imageUrls = blobs.map(b => b ? URL.createObjectURL(b) : '');
-                          // Filter out failed loads
-                          imageUrls = imageUrls.filter(url => url !== '');
+                          const blobUrls = blobs.map(b => b ? URL.createObjectURL(b) : '');
+                          // Mix: If blob exists use it, otherwise keep the original string (might be static path)
+                          imageUrls = s.images.map((img, idx) => blobUrls[idx] || img).filter(Boolean);
                       }
                       return { ...s, images: imageUrls };
                   }));
@@ -64,12 +72,23 @@ const App: React.FC = () => {
                               return { ...s, url: URL.createObjectURL(blob) };
                           }
                       }
-                      return s; // Fallback or invalid
+                      return s; // Return as is (might be static URL)
                   }));
 
                   setStars(restoredStars);
-                  setPlaylist(restoredPlaylist.filter(s => s.url)); // Remove broken songs
+                  setPlaylist(restoredPlaylist.filter(s => s.url)); 
                   setPlaybackCount(savedState.playbackCount);
+              } else {
+                  // SITUATION B: New User (or cleared cache) -> Use STATIC_DATA (The "Snapshot")
+                  // We don't need to do anything here because useState initialized with STATIC_DATA
+                  // But we might want to save this static state to DB so future edits are saved
+                  if (STATIC_STARS.length > 0) {
+                      DB.saveGameState({
+                          stars: STATIC_STARS,
+                          playlist: STATIC_PLAYLIST,
+                          playbackCount: INITIAL_PLAYBACK_COUNT
+                      });
+                  }
               }
           } catch (e) {
               console.error("Failed to load game state", e);
@@ -82,12 +101,43 @@ const App: React.FC = () => {
 
   // --- Persistence: Save Helper ---
   const saveGame = async (newStars: StarData[], newPlaylist: Song[], newPlaybackCount: number) => {
-      // We pass the new state directly to ensure we save the latest snapshot
       await DB.saveGameState({
           stars: newStars,
           playlist: newPlaylist,
           playbackCount: newPlaybackCount
       });
+  };
+
+  // --- Dev Tool: Export Data ---
+  const handleExportData = () => {
+      // Clean data for export (remove Blob URLs, try to hint at file placement)
+      const cleanStars = stars.map(s => ({
+          ...s,
+          // We can't know the original filename of a blob easily here unless stored, 
+          // but we provide a template for the user to fill in.
+          images: s.images.map(img => img.startsWith('blob:') ? "/assets/REPLACE_WITH_YOUR_FILENAME.jpg" : img),
+          imageAssetIds: undefined // Don't export DB IDs
+      }));
+
+      const cleanPlaylist = playlist.map(s => ({
+          id: s.id,
+          name: s.name,
+          url: s.url.startsWith('blob:') ? `/assets/${s.name}` : s.url, // Try to guess path based on song name
+          assetId: undefined
+      }));
+
+      const exportString = `
+// --- COPY BELOW THIS LINE into data/initialData.ts ---
+
+export const STATIC_STARS = ${JSON.stringify(cleanStars, null, 2)};
+
+export const STATIC_PLAYLIST = ${JSON.stringify(cleanPlaylist, null, 2)};
+
+export const INITIAL_PLAYBACK_COUNT = ${playbackCount};
+      `;
+
+      console.log(exportString);
+      alert("Data exported to Console (F12). Copy the JSON and paste it into 'data/initialData.ts'. \n\nIMPORTANT: Move your actual image/music files to a 'public/assets' folder and ensure the filenames in the code match your files.");
   };
 
   // Derived Progression Stats
@@ -102,7 +152,6 @@ const App: React.FC = () => {
   const [isUploadModalOpen, setUploadModalOpen] = useState(false);
   const [editingStarId, setEditingStarId] = useState<number | null>(null);
   
-  // Temp state now tracks metadata + file to allow saving
   const [tempImages, setTempImages] = useState<TempImage[]>([]);
   const [tempText, setTempText] = useState("");
   const [dragActive, setDragActive] = useState(false);
@@ -119,9 +168,7 @@ const App: React.FC = () => {
         }
 
         try {
-            // Save to DB immediately
             const assetId = await DB.saveAsset(file);
-            
             const newSong: Song = {
                 id: generateId(),
                 name: file.name,
@@ -132,8 +179,6 @@ const App: React.FC = () => {
             const newPlaylist = [...playlist, newSong];
             setPlaylist(newPlaylist);
             setCurrentSongIndex(newPlaylist.length - 1);
-            
-            // Persist State
             saveGame(stars, newPlaylist, playbackCount);
         } catch (err) {
             console.error("Failed to save music", err);
@@ -151,7 +196,6 @@ const App: React.FC = () => {
       const star = stars.find(s => s.id === id);
       if (star) {
           setEditingStarId(id);
-          // Pre-fill data. Map existing URLs and AssetIDs to TempImage structure
           const existingImages: TempImage[] = star.images.map((url, index) => ({
               url,
               assetId: star.imageAssetIds ? star.imageAssetIds[index] : undefined
@@ -178,18 +222,16 @@ const App: React.FC = () => {
       if (editingStarId === null) return;
 
       try {
-          // Process images: If it has a File, save it to DB and get AssetID. 
-          // If it already has AssetID, keep it.
           const processedImages = await Promise.all(tempImages.map(async (img) => {
               if (img.file) {
                   const id = await DB.saveAsset(img.file);
-                  return { url: img.url, assetId: id }; // New persisted image
+                  return { url: img.url, assetId: id }; 
               }
-              return { url: img.url, assetId: img.assetId }; // Existing persisted image
+              return { url: img.url, assetId: img.assetId };
           }));
 
           const finalImageUrls = processedImages.map(p => p.url);
-          const finalAssetIds = processedImages.map(p => p.assetId || ''); // Should ideally always have ID
+          const finalAssetIds = processedImages.map(p => p.assetId || ''); 
 
           const newStars = stars.map(star => {
               if (star.id === editingStarId) {
@@ -199,7 +241,7 @@ const App: React.FC = () => {
                       images: finalImageUrls,
                       imageAssetIds: finalAssetIds,
                       text: tempText,
-                      viewCount: 0 // Reset count on new launch/edit
+                      viewCount: 0 
                   };
               }
               return star;
@@ -208,7 +250,6 @@ const App: React.FC = () => {
           setStars(newStars);
           saveGame(newStars, playlist, playbackCount);
 
-          // Reset Form
           setTempImages([]);
           setTempText("");
           setEditingStarId(null);
@@ -236,7 +277,7 @@ const App: React.FC = () => {
           const file = files[i];
           newTempImages.push({
               url: URL.createObjectURL(file),
-              file: file // Store file for saving later
+              file: file 
           });
       }
       setTempImages(prev => [...prev, ...newTempImages]);
@@ -269,7 +310,6 @@ const App: React.FC = () => {
       document.getElementById('img-upload')?.click();
   };
 
-  // Deletion logic passed to MusicPlayer needs to persist too
   const handlePlaylistUpdate = (newPlaylist: Song[]) => {
       setPlaylist(newPlaylist);
       saveGame(stars, newPlaylist, playbackCount);
@@ -303,6 +343,16 @@ const App: React.FC = () => {
                  XP: {playbackCount} | Cap: {maxPlaylistSize} {isContinuousPlayUnlocked ? "| ∞ Play Active" : ""}
              </div>
           )}
+      </div>
+
+      {/* Deployment Helper Button */}
+      <div className="absolute bottom-6 left-6 z-10">
+          <button 
+            onClick={handleExportData}
+            className="text-[10px] bg-slate-800/50 hover:bg-slate-700/80 text-slate-300 px-3 py-1 rounded border border-slate-600/50 uppercase tracking-widest transition-colors"
+          >
+              ⚡ Export Data
+          </button>
       </div>
 
       {/* Star Creation Modal */}
