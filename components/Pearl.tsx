@@ -1,5 +1,6 @@
 import React from 'react';
 import { Float } from '@react-three/drei';
+import '../types';
 
 export const Pearl: React.FC = () => {
   return (

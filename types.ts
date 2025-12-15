@@ -1,3 +1,5 @@
+import { ThreeElements } from '@react-three/fiber';
+
 export interface StarData {
   id: number;
   position: [number, number, number];
@@ -18,4 +20,24 @@ export interface Song {
 export interface OceanProps {
   stars: StarData[];
   onStarClick: (id: number) => void;
+}
+
+declare global {
+  namespace JSX {
+    interface IntrinsicElements {
+      mesh: any;
+      group: any;
+      sphereGeometry: any;
+      meshBasicMaterial: any;
+      meshStandardMaterial: any;
+      meshPhysicalMaterial: any;
+      ringGeometry: any;
+      cylinderGeometry: any;
+      planeGeometry: any;
+      fog: any;
+      ambientLight: any;
+      spotLight: any;
+      pointLight: any;
+    }
+  }
 }

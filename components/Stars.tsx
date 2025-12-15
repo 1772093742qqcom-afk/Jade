@@ -57,6 +57,35 @@ const StarShape: React.FC<{ isActive: boolean; onClick: (e: any) => void; onHove
   );
 };
 
+// Robust Image Component that handles errors
+const SafeImage: React.FC<{ src: string; className?: string; onClick?: (e: any) => void }> = ({ src, className, onClick }) => {
+    const [hasError, setHasError] = useState(false);
+
+    if (hasError) {
+        return (
+            <div 
+                className={`${className} flex items-center justify-center bg-slate-800 border border-slate-600 text-slate-500`} 
+                onClick={onClick}
+            >
+                <div className="text-center">
+                    <div className="text-2xl mb-1">⚠</div>
+                    <div className="text-[8px] uppercase tracking-widest">Image Lost</div>
+                </div>
+            </div>
+        );
+    }
+
+    return (
+        <img 
+            src={src} 
+            className={className} 
+            onClick={onClick}
+            onError={() => setHasError(true)}
+            alt="memory"
+        />
+    );
+};
+
 const Star: React.FC<{ star: StarData; onStarClick: (id: number) => void; onStarView: (id: number) => void }> = ({ star, onStarClick, onStarView }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [hovered, setHovered] = useState(false);
@@ -115,7 +144,7 @@ const Star: React.FC<{ star: StarData; onStarClick: (id: number) => void; onStar
                                 <div className={`grid gap-1 h-full w-full ${star.images.length === 1 ? 'grid-cols-1' : 'grid-cols-2 grid-rows-2'}`}>
                                     {star.images.map((img, idx) => (
                                         <div key={idx} className="relative w-full h-full overflow-hidden rounded group">
-                                            <img 
+                                            <SafeImage 
                                                 src={img} 
                                                 className="w-full h-full object-cover cursor-pointer group-hover:scale-110 transition-transform duration-500" 
                                                 onClick={(e) => { e.stopPropagation(); setExpandedImgIndex(idx); }}
@@ -131,7 +160,7 @@ const Star: React.FC<{ star: StarData; onStarClick: (id: number) => void; onStar
                                         className="flex-grow h-full cursor-pointer relative overflow-hidden rounded border border-cyan-400/50 shadow-lg"
                                         onClick={(e) => { e.stopPropagation(); setExpandedImgIndex(null); }}
                                     >
-                                        <img 
+                                        <SafeImage 
                                             src={star.images[expandedImgIndex]} 
                                             className="w-full h-full object-contain bg-black/50" 
                                         />
@@ -146,7 +175,7 @@ const Star: React.FC<{ star: StarData; onStarClick: (id: number) => void; onStar
                                             {star.images.map((img, idx) => {
                                                 if (idx === expandedImgIndex) return null;
                                                 return (
-                                                    <img 
+                                                    <SafeImage 
                                                         key={idx} 
                                                         src={img} 
                                                         className="w-full h-16 object-cover rounded opacity-60 hover:opacity-100 cursor-pointer transition-opacity border border-white/10"

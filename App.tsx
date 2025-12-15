@@ -5,25 +5,6 @@ import { StarData, Song } from './types';
 import * as DB from './utils/db';
 import { STATIC_STARS, STATIC_PLAYLIST, INITIAL_PLAYBACK_COUNT } from './data/initialData';
 
-// Fallback generator only used if STATIC_STARS is empty
-const generateRandomStars = (): StarData[] => Array.from({ length: 20 }, (_, i) => {
-    const theta = Math.random() * Math.PI * 2;
-    const radius = 8 + Math.random() * 12; 
-    const y = -1.5 + Math.random() * 6;
-
-    return {
-        id: i,
-        position: [
-            radius * Math.cos(theta),
-            y,
-            radius * Math.sin(theta)
-        ],
-        isActive: false,
-        images: [],
-        viewCount: 0
-    };
-});
-
 const generateId = () => Math.random().toString(36).substring(2, 9);
 
 interface TempImage {
@@ -32,34 +13,75 @@ interface TempImage {
     assetId?: string;
 }
 
+// Helper to convert Blob/URL to Base64
+const urlToBase64 = async (url: string): Promise<string> => {
+    try {
+        if (url.startsWith('data:')) return url; // Already base64
+        
+        const response = await fetch(url);
+        const blob = await response.blob();
+        
+        return await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+    } catch (e) {
+        console.warn("Failed to convert to base64:", url, e);
+        return url; // Fallback to original url
+    }
+};
+
 const App: React.FC = () => {
-  // Initialize with Static Data if available, otherwise random
-  const initialStarState = STATIC_STARS.length > 0 ? STATIC_STARS : generateRandomStars();
-  
-  const [stars, setStars] = useState<StarData[]>(initialStarState);
+  // --- Initialization Logic ---
+  // 1. Try to use STATIC_STARS if they exist.
+  // 2. Fallback to random generation if static data is empty.
+  const [stars, setStars] = useState<StarData[]>(() => {
+      if (STATIC_STARS.length > 0) {
+          return STATIC_STARS;
+      }
+      // Fallback Generator
+      return Array.from({ length: 20 }, (_, i) => {
+          const theta = Math.random() * Math.PI * 2;
+          const radius = 8 + Math.random() * 12; 
+          const y = -1.5 + Math.random() * 6;
+          return {
+              id: i,
+              position: [
+                  radius * Math.cos(theta),
+                  y,
+                  radius * Math.sin(theta)
+              ],
+              isActive: false,
+              images: [],
+              viewCount: 0
+          };
+      });
+  });
+
   const [playlist, setPlaylist] = useState<Song[]>(STATIC_PLAYLIST);
   const [currentSongIndex, setCurrentSongIndex] = useState(0);
   const [playbackCount, setPlaybackCount] = useState(INITIAL_PLAYBACK_COUNT);
   const [isDataLoaded, setIsDataLoaded] = useState(false);
 
   // --- Persistence: Load on Mount ---
+  // Checks IndexedDB. If user has local changes, they override the static defaults.
   useEffect(() => {
       const init = async () => {
           try {
               const savedState = await DB.loadGameState();
               if (savedState) {
-                  // SITUATION A: User has visited before (Load from their DB)
-                  
-                  // Reconstruct Stars
+                  // Reconstruct Stars (Convert AssetIDs to Blob URLs)
                   const restoredStars = await Promise.all(savedState.stars.map(async (s) => {
-                      let imageUrls: string[] = s.images; // Default to existing URLs (could be static paths)
+                      let imageUrls: string[] = s.images || [];
                       
-                      // If it has DB Asset IDs, try to load blobs
+                      // Try to load from DB Blobs if available
                       if (s.imageAssetIds && s.imageAssetIds.length > 0) {
                           const blobs = await Promise.all(s.imageAssetIds.map(id => DB.getAsset(id)));
                           const blobUrls = blobs.map(b => b ? URL.createObjectURL(b) : '');
-                          // Mix: If blob exists use it, otherwise keep the original string (might be static path)
-                          imageUrls = s.images.map((img, idx) => blobUrls[idx] || img).filter(Boolean);
+                          // If blob load worked, use it. Otherwise keep original URL (in case it was static)
+                          imageUrls = imageUrls.map((original, i) => blobUrls[i] || original).filter(Boolean);
                       }
                       return { ...s, images: imageUrls };
                   }));
@@ -72,23 +94,12 @@ const App: React.FC = () => {
                               return { ...s, url: URL.createObjectURL(blob) };
                           }
                       }
-                      return s; // Return as is (might be static URL)
+                      return s; 
                   }));
 
                   setStars(restoredStars);
                   setPlaylist(restoredPlaylist.filter(s => s.url)); 
                   setPlaybackCount(savedState.playbackCount);
-              } else {
-                  // SITUATION B: New User (or cleared cache) -> Use STATIC_DATA (The "Snapshot")
-                  // We don't need to do anything here because useState initialized with STATIC_DATA
-                  // But we might want to save this static state to DB so future edits are saved
-                  if (STATIC_STARS.length > 0) {
-                      DB.saveGameState({
-                          stars: STATIC_STARS,
-                          playlist: STATIC_PLAYLIST,
-                          playbackCount: INITIAL_PLAYBACK_COUNT
-                      });
-                  }
               }
           } catch (e) {
               console.error("Failed to load game state", e);
@@ -109,24 +120,42 @@ const App: React.FC = () => {
   };
 
   // --- Dev Tool: Export Data ---
-  const handleExportData = () => {
-      // Clean data for export (remove Blob URLs, try to hint at file placement)
-      const cleanStars = stars.map(s => ({
-          ...s,
-          // We can't know the original filename of a blob easily here unless stored, 
-          // but we provide a template for the user to fill in.
-          images: s.images.map(img => img.startsWith('blob:') ? "/assets/REPLACE_WITH_YOUR_FILENAME.jpg" : img),
-          imageAssetIds: undefined // Don't export DB IDs
-      }));
+  const handleExportData = async () => {
+      // Show loading state implicitly by console log or let user wait
+      console.log("Starting Export... Converting assets to Base64...");
+      
+      try {
+        // Convert Star Images to Base64
+        const cleanStars = await Promise.all(stars.map(async (s) => {
+            const base64Images = await Promise.all(s.images.map(img => urlToBase64(img)));
+            return {
+                ...s,
+                images: base64Images,
+                imageAssetIds: undefined // Don't export DB IDs
+            };
+        }));
 
-      const cleanPlaylist = playlist.map(s => ({
-          id: s.id,
-          name: s.name,
-          url: s.url.startsWith('blob:') ? `/assets/${s.name}` : s.url, // Try to guess path based on song name
-          assetId: undefined
-      }));
+        // Convert Playlist Audio to Base64 (Warning: This can be huge)
+        // Ideally we only export metadata for audio if it's too big, but let's try.
+        // If it's a static path, urlToBase64 fetches it.
+        const cleanPlaylist = await Promise.all(playlist.map(async (s) => {
+             // Optional: Limit audio export if needed. For now, try to export everything.
+             // If url is blob, convert. If url is /assets/..., fetch and convert.
+             let b64Url = s.url;
+             // Only convert if it's not already a long data string (optimization)
+             if (!s.url.startsWith('data:')) {
+                 b64Url = await urlToBase64(s.url);
+             }
 
-      const exportString = `
+             return {
+                id: s.id,
+                name: s.name,
+                url: b64Url,
+                assetId: undefined
+             };
+        }));
+
+        const exportString = `
 // --- COPY BELOW THIS LINE into data/initialData.ts ---
 
 export const STATIC_STARS = ${JSON.stringify(cleanStars, null, 2)};
@@ -134,10 +163,14 @@ export const STATIC_STARS = ${JSON.stringify(cleanStars, null, 2)};
 export const STATIC_PLAYLIST = ${JSON.stringify(cleanPlaylist, null, 2)};
 
 export const INITIAL_PLAYBACK_COUNT = ${playbackCount};
-      `;
+        `;
 
-      console.log(exportString);
-      alert("Data exported to Console (F12). Copy the JSON and paste it into 'data/initialData.ts'. \n\nIMPORTANT: Move your actual image/music files to a 'public/assets' folder and ensure the filenames in the code match your files.");
+        await navigator.clipboard.writeText(exportString);
+        alert("DATA COPIED! (Embedded Images/Audio)\n\n1. Go to the chat.\n2. Paste (Ctrl+V) the code.\n3. I will save it to the file for you.");
+      } catch (err) {
+        console.error("Export failed", err);
+        alert("Export failed. See console for details.");
+      }
   };
 
   // Derived Progression Stats
@@ -152,6 +185,7 @@ export const INITIAL_PLAYBACK_COUNT = ${playbackCount};
   const [isUploadModalOpen, setUploadModalOpen] = useState(false);
   const [editingStarId, setEditingStarId] = useState<number | null>(null);
   
+  // Temp state now tracks metadata + file to allow saving
   const [tempImages, setTempImages] = useState<TempImage[]>([]);
   const [tempText, setTempText] = useState("");
   const [dragActive, setDragActive] = useState(false);
@@ -168,7 +202,9 @@ export const INITIAL_PLAYBACK_COUNT = ${playbackCount};
         }
 
         try {
+            // Save to DB immediately
             const assetId = await DB.saveAsset(file);
+            
             const newSong: Song = {
                 id: generateId(),
                 name: file.name,
@@ -179,6 +215,8 @@ export const INITIAL_PLAYBACK_COUNT = ${playbackCount};
             const newPlaylist = [...playlist, newSong];
             setPlaylist(newPlaylist);
             setCurrentSongIndex(newPlaylist.length - 1);
+            
+            // Persist State
             saveGame(stars, newPlaylist, playbackCount);
         } catch (err) {
             console.error("Failed to save music", err);
@@ -196,6 +234,7 @@ export const INITIAL_PLAYBACK_COUNT = ${playbackCount};
       const star = stars.find(s => s.id === id);
       if (star) {
           setEditingStarId(id);
+          // Pre-fill data. Map existing URLs and AssetIDs to TempImage structure
           const existingImages: TempImage[] = star.images.map((url, index) => ({
               url,
               assetId: star.imageAssetIds ? star.imageAssetIds[index] : undefined
@@ -222,16 +261,18 @@ export const INITIAL_PLAYBACK_COUNT = ${playbackCount};
       if (editingStarId === null) return;
 
       try {
+          // Process images: If it has a File, save it to DB and get AssetID. 
+          // If it already has AssetID, keep it.
           const processedImages = await Promise.all(tempImages.map(async (img) => {
               if (img.file) {
                   const id = await DB.saveAsset(img.file);
-                  return { url: img.url, assetId: id }; 
+                  return { url: img.url, assetId: id }; // New persisted image
               }
-              return { url: img.url, assetId: img.assetId };
+              return { url: img.url, assetId: img.assetId }; // Existing persisted image
           }));
 
           const finalImageUrls = processedImages.map(p => p.url);
-          const finalAssetIds = processedImages.map(p => p.assetId || ''); 
+          const finalAssetIds = processedImages.map(p => p.assetId || ''); // Should ideally always have ID
 
           const newStars = stars.map(star => {
               if (star.id === editingStarId) {
@@ -241,7 +282,7 @@ export const INITIAL_PLAYBACK_COUNT = ${playbackCount};
                       images: finalImageUrls,
                       imageAssetIds: finalAssetIds,
                       text: tempText,
-                      viewCount: 0 
+                      viewCount: 0 // Reset count on new launch/edit
                   };
               }
               return star;
@@ -250,6 +291,7 @@ export const INITIAL_PLAYBACK_COUNT = ${playbackCount};
           setStars(newStars);
           saveGame(newStars, playlist, playbackCount);
 
+          // Reset Form
           setTempImages([]);
           setTempText("");
           setEditingStarId(null);
@@ -277,7 +319,7 @@ export const INITIAL_PLAYBACK_COUNT = ${playbackCount};
           const file = files[i];
           newTempImages.push({
               url: URL.createObjectURL(file),
-              file: file 
+              file: file // Store file for saving later
           });
       }
       setTempImages(prev => [...prev, ...newTempImages]);
@@ -310,6 +352,7 @@ export const INITIAL_PLAYBACK_COUNT = ${playbackCount};
       document.getElementById('img-upload')?.click();
   };
 
+  // Deletion logic passed to MusicPlayer needs to persist too
   const handlePlaylistUpdate = (newPlaylist: Song[]) => {
       setPlaylist(newPlaylist);
       saveGame(stars, newPlaylist, playbackCount);
@@ -351,7 +394,7 @@ export const INITIAL_PLAYBACK_COUNT = ${playbackCount};
             onClick={handleExportData}
             className="text-[10px] bg-slate-800/50 hover:bg-slate-700/80 text-slate-300 px-3 py-1 rounded border border-slate-600/50 uppercase tracking-widest transition-colors"
           >
-              ⚡ Export Data
+              ⚡ Export Data (Base64)
           </button>
       </div>
 
